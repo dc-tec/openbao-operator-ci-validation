@@ -57,7 +57,9 @@ func runRouting(t *testing.T, base, head, failure, event string) (map[string]str
 		commitFixture(t, dir)
 	}
 	headSHA := gitCommand(t, dir, "rev-parse", "HEAD")
-	for _, name := range []string{"e2e-lifecycle-paths.txt", "e2e-seal-paths.txt", "e2e-selection-paths.txt"} {
+	for _, name := range []string{
+		"e2e-lifecycle-paths.txt", "e2e-seal-paths.txt", "e2e-execution-paths.txt", "e2e-selection-paths.txt",
+	} {
 		data, err := os.ReadFile(filepath.Join("..", "..", "..", "hack", "ci", name))
 		if err != nil {
 			t.Fatal(err)
@@ -178,6 +180,36 @@ func TestChangeDetectionRoutesRealGitDiffs(t *testing.T) {
 	}
 }
 
+func TestSharedExecutionChangesSelectEveryLaneFamily(t *testing.T) {
+	for _, path := range []string{
+		".github/actions/run-e2e-lane/action.yml",
+		".github/actions/prepare-e2e-lane/action.yml",
+		".github/actions/load-e2e-image-artifacts/action.yml",
+		".github/actions/setup-repo-tools/action.yml",
+		"hack/ci/e2e-images.py",
+		"hack/ci/e2e_artifacts.py",
+		"hack/ci/build-e2e-binaries.sh",
+		"hack/ci/configure-e2e-lane.py",
+		"hack/ci/e2e-binaries.py",
+		"hack/ci/run-e2e.sh",
+		"hack/ci/summarize-e2e.sh",
+		"hack/ci/e2e-execution-paths.txt",
+		"hack/tools/e2e_report/main.go",
+	} {
+		t.Run(path, func(t *testing.T) {
+			outputs, err := runRouting(t, "normal", path, "", eventPullRequest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"workflow", "e2e", "e2e_backup", "e2e_upgrade", "e2e_hardened", "e2e_seal"} {
+				if outputs[key] != routingTrue {
+					t.Fatalf("shared execution change %s does not select %s", path, key)
+				}
+			}
+		})
+	}
+}
+
 func TestSharedSelectionChangesSelectEveryLaneFamily(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	if err != nil {
@@ -250,7 +282,7 @@ func TestSharedSelectionChangesSelectEveryLaneFamily(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, job := range []string{"build-artifacts", "build-e2e-images", "operator-upgrade-e2e", "e2e-matrix", "e2e"} {
+			for _, job := range []string{"build-e2e-images", "operator-upgrade-e2e", "e2e"} {
 				if forkPlan.Checks[job] {
 					t.Fatalf("shared selection change must not select %s on a fork PR", job)
 				}
