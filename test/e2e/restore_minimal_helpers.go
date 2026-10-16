@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -18,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
@@ -172,6 +174,11 @@ func newMinimalRestoreFixture(ctx context.Context) *minimalRestoreFixture {
 	gomega.Expect(api.AddToScheme(scheme)).To(gomega.Succeed())
 	f.client, err = client.New(f.config, client.Options{Scheme: scheme})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	apiService := &corev1.Service{}
+	gomega.Expect(f.client.Get(ctx, client.ObjectKey{Namespace: "default", Name: "kubernetes"}, apiService)).To(gomega.Succeed())
+	gomega.Expect(apiService.Spec.IPFamilies).NotTo(gomega.BeEmpty())
+	families := append([]corev1.IPFamily(nil), apiService.Spec.IPFamilies[:1]...)
+	policy := corev1.IPFamilyPolicySingleStack
 	f.sourceFW, err = framework.New(ctx, f.client, "minimal-source", operatorNamespace)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	f.destinationFW, err = framework.New(ctx, f.client, "minimal-destination", operatorNamespace)
@@ -233,6 +240,10 @@ func newMinimalRestoreFixture(ctx context.Context) *minimalRestoreFixture {
 				Image:   configInitImage,
 			},
 			Storage: api.StorageConfig{Size: "1Gi"},
+			Service: &api.ServiceConfig{
+				IPFamilyPolicy: ptr.To(corev1.IPFamilyPolicySingleStack),
+				IPFamilies:     apiService.Spec.IPFamilies[:1],
+			},
 			TLS: api.TLSConfig{
 				Enabled:        true,
 				Mode:           api.TLSModeOperatorManaged,
@@ -295,11 +306,25 @@ func newMinimalRestoreFixture(ctx context.Context) *minimalRestoreFixture {
 		ExpectedDigest:    summary.Digest,
 		ExpectedSize:      summary.Size,
 	}
+	sourcePod := &corev1.Pod{}
+	gomega.Expect(f.client.Get(ctx, client.ObjectKey{Namespace: f.source.Namespace, Name: f.source.Name + "-0"}, sourcePod)).To(gomega.Succeed())
+	assertNetworkProfile(*sourcePod, os.Getenv("E2E_NETWORK_PROFILE"))
+	if len(sourcePod.Status.PodIPs) == 2 {
+		// The Kubernetes API Service can remain single-stack in a dual-stack
+		// cluster. Use the actual Pod addresses to require both families.
+		secondary := corev1.IPv6Protocol
+		if families[0] == corev1.IPv6Protocol {
+			secondary = corev1.IPv4Protocol
+		}
+		families = []corev1.IPFamily{secondary, families[0]}
+		policy = corev1.IPFamilyPolicyRequireDualStack
+	}
 	f.template = &api.RestoreClusterTemplate{
 		Version: "2.7.1",
 		Image:   image,
 		Storage: f.source.Spec.Storage,
 		TLS:     f.source.Spec.TLS,
+		Service: &api.RestoreTargetServiceConfig{IPFamilyPolicy: &policy, IPFamilies: families},
 
 		InitContainer: f.source.Spec.InitContainer.DeepCopy(),
 		Unseal:        *f.source.Spec.Unseal.DeepCopy(),

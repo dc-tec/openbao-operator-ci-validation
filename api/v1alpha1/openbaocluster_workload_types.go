@@ -32,7 +32,22 @@ type StorageConfig struct {
 }
 
 // ServiceConfig controls how the main OpenBao Service is exposed.
+// +kubebuilder:validation:XValidation:rule="!has(self.ipFamilies) || size(self.ipFamilies) != 2 || self.ipFamilies[0] != self.ipFamilies[1]",message="ipFamilies must not contain duplicate families"
+// +kubebuilder:validation:XValidation:rule="!has(self.ipFamilies) || size(self.ipFamilies) != 2 || (has(self.ipFamilyPolicy) && self.ipFamilyPolicy != 'SingleStack')",message="Two IP families require PreferDualStack or RequireDualStack"
 type ServiceConfig struct {
+	// IPFamilyPolicy selects single-stack or dual-stack Service allocation.
+	// When omitted, Kubernetes uses its default Service policy.
+	// Two IP families require PreferDualStack or RequireDualStack.
+	// +kubebuilder:validation:Enum=SingleStack;PreferDualStack;RequireDualStack
+	// +optional
+	IPFamilyPolicy *corev1.IPFamilyPolicy `json:"ipFamilyPolicy,omitempty"`
+	// IPFamilies selects the Service IP families in primary-first order.
+	// The primary family cannot change after the Service is created.
+	// +kubebuilder:validation:MaxItems=2
+	// +kubebuilder:validation:items:Enum=IPv4;IPv6
+	// +listType=atomic
+	// +optional
+	IPFamilies []corev1.IPFamily `json:"ipFamilies,omitempty"`
 	// Type is the Kubernetes Service type, for example "ClusterIP" or "LoadBalancer".
 	// +optional
 	Type corev1.ServiceType `json:"type,omitempty"`
@@ -43,7 +58,22 @@ type ServiceConfig struct {
 
 // ReadReplicaServiceConfig controls the optional read-only Service for the
 // read-replica pool.
+// +kubebuilder:validation:XValidation:rule="!has(self.ipFamilies) || size(self.ipFamilies) != 2 || self.ipFamilies[0] != self.ipFamilies[1]",message="ipFamilies must not contain duplicate families"
+// +kubebuilder:validation:XValidation:rule="!has(self.ipFamilies) || size(self.ipFamilies) != 2 || (has(self.ipFamilyPolicy) && self.ipFamilyPolicy != 'SingleStack')",message="Two IP families require PreferDualStack or RequireDualStack"
 type ReadReplicaServiceConfig struct {
+	// IPFamilyPolicy selects single-stack or dual-stack Service allocation.
+	// When omitted, Kubernetes uses its default Service policy.
+	// Two IP families require PreferDualStack or RequireDualStack.
+	// +kubebuilder:validation:Enum=SingleStack;PreferDualStack;RequireDualStack
+	// +optional
+	IPFamilyPolicy *corev1.IPFamilyPolicy `json:"ipFamilyPolicy,omitempty"`
+	// IPFamilies selects the Service IP families in primary-first order.
+	// The primary family cannot change after the Service is created.
+	// +kubebuilder:validation:MaxItems=2
+	// +kubebuilder:validation:items:Enum=IPv4;IPv6
+	// +listType=atomic
+	// +optional
+	IPFamilies []corev1.IPFamily `json:"ipFamilies,omitempty"`
 	// Enabled controls whether the operator creates a dedicated Service for the
 	// read-replica pool.
 	// +optional

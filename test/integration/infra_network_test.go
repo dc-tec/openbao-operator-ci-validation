@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -21,7 +22,94 @@ import (
 	"github.com/kubebao/openbao-operator/internal/platform/constants"
 	"github.com/kubebao/openbao-operator/internal/platform/resourceidentity"
 	portopenbao "github.com/kubebao/openbao-operator/internal/port/openbao"
+	networkingmanager "github.com/kubebao/openbao-operator/internal/service/networking"
 )
+
+func TestInfraNetwork_ClientServicePrimaryFamilyChange(t *testing.T) {
+	ensureDefaultAdmissionPoliciesApplied(t)
+	for _, pool := range []string{"main", "read"} {
+		t.Run(pool, func(t *testing.T) {
+			namespace := newTestNamespace(t)
+			cluster := newMinimalClusterObj(namespace, "primary-family-"+pool)
+			key := client.ObjectKey{Namespace: namespace, Name: cluster.Name + infraPublicServiceSuffix}
+			if pool == "main" {
+				cluster.Spec.Service = &openbaov1alpha1.ServiceConfig{}
+			} else {
+				cluster.Spec.ReadReplicas = &openbaov1alpha1.ReadReplicaConfig{Replicas: 1,
+					Service: &openbaov1alpha1.ReadReplicaServiceConfig{Enabled: true}}
+				key.Name = resourceidentity.ReadReplicaServiceName(cluster)
+			}
+			require.NoError(t, k8sClient.Create(ctx, cluster))
+			manager := networkingmanager.NewManager(newControllerClient(t), k8sScheme, "openbao-operator-system", constants.PlatformKubernetes)
+			require.NoError(t, manager.Reconcile(ctx, logr.Discard(), cluster))
+			service := &corev1.Service{}
+			require.NoError(t, k8sClient.Get(ctx, key, service))
+			uid, clusterIPs, families := service.UID, service.Spec.ClusterIPs, service.Spec.IPFamilies
+			require.NotEmpty(t, families)
+			requested := corev1.IPv6Protocol
+			if families[0] == corev1.IPv6Protocol {
+				requested = corev1.IPv4Protocol
+			}
+			configure := func(families ...corev1.IPFamily) {
+				if pool == "main" {
+					cluster.Spec.Service.IPFamilies = families
+				} else {
+					cluster.Spec.ReadReplicas.Service.IPFamilies = families
+				}
+			}
+			configure(requested)
+			// Admission cannot infer a Service's allocated family from an older
+			// CR that omitted ipFamilies. The runtime check must inspect the Service.
+			require.NoError(t, k8sClient.Update(ctx, cluster))
+			err := manager.Reconcile(ctx, logr.Discard(), cluster)
+			require.ErrorIs(t, err, networkingmanager.ErrServiceIPFamilyChangeNotSupported)
+			require.ErrorContains(t, err, "keep "+string(families[0])+" first")
+			require.NoError(t, k8sClient.Get(ctx, key, service))
+			require.Equal(t, uid, service.UID)
+			require.Equal(t, clusterIPs, service.Spec.ClusterIPs)
+			require.Equal(t, families, service.Spec.IPFamilies)
+			configure(families[0])
+			require.NoError(t, k8sClient.Update(ctx, cluster))
+			require.NoError(t, manager.Reconcile(ctx, logr.Discard(), cluster))
+			configure(requested)
+			require.NoError(t, k8sClient.Update(ctx, cluster))
+			require.ErrorIs(t, manager.Reconcile(ctx, logr.Discard(), cluster), networkingmanager.ErrServiceIPFamilyChangeNotSupported)
+			configure()
+			require.NoError(t, k8sClient.Update(ctx, cluster))
+			require.NoError(t, manager.Reconcile(ctx, logr.Discard(), cluster))
+			require.NoError(t, k8sClient.Get(ctx, key, service))
+			require.Equal(t, uid, service.UID)
+			require.Equal(t, clusterIPs, service.Spec.ClusterIPs)
+			require.Equal(t, families, service.Spec.IPFamilies)
+		})
+	}
+}
+
+func TestInfraNetwork_HeadlessServicePreservesPrimaryFamilyWhileUpgradingPolicy(t *testing.T) {
+	namespace := newTestNamespace(t)
+	cluster := newMinimalClusterObj(namespace, "headless-family")
+	require.NoError(t, k8sClient.Create(ctx, cluster))
+	createTLSSecret(t, namespace, cluster.Name)
+	c := newControllerClient(t)
+	spec := newTestStatefulSetSpec(cluster)
+	require.NoError(t, reconcileClusterResources(ctx, logr.Discard(), c, k8sScheme, cluster, spec))
+	service := &corev1.Service{}
+	key := client.ObjectKeyFromObject(cluster)
+	require.NoError(t, c.Get(ctx, key, service))
+	uid, clusterIPs, families := service.UID, service.Spec.ClusterIPs, service.Spec.IPFamilies
+	// Simulate a Service created by the previous single-stack default. Repair
+	// its policy through SSA without replacing its identity or primary family.
+	service.Spec.IPFamilyPolicy = ptr.To(corev1.IPFamilyPolicySingleStack)
+	require.NoError(t, c.Update(ctx, service))
+	for range 2 {
+		require.NoError(t, reconcileClusterResources(ctx, logr.Discard(), c, k8sScheme, cluster, spec))
+	}
+	require.NoError(t, c.Get(ctx, key, service))
+	require.Equal(t, uid, service.UID)
+	require.Equal(t, clusterIPs, service.Spec.ClusterIPs)
+	require.Equal(t, families, service.Spec.IPFamilies)
+	require.Equal(t, corev1.IPFamilyPolicyPreferDualStack, *service.Spec.IPFamilyPolicy)
+}
 
 const (
 	infraPublicServiceSuffix    = "-public"
