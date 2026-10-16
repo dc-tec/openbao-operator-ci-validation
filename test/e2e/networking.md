@@ -6,7 +6,8 @@ IP families, Kubernetes API access, and denied workload and helper egress. A rea
 provide the negative test's control. The External TLS case supplies only the stable server-name DNS SAN.
 
 Weekly and release qualification add IPv6 scaling, restart, rolling upgrade, and storage-provider journeys. They also run the
-networking scenarios and fresh/scheduled restore targets on dual-stack clusters with each primary family. The restore
+networking scenarios on IPv4 and dual-stack clusters with each primary family, plus fresh/scheduled restore targets on both
+dual-stack orders. The restore
 fixture selects a destination client Service primary family different from the source on dual-stack clusters. It checks
 the generated request, target, and Service, then retains the existing application and cleanup checks across two scheduled
 runs. These restore journeys also run on IPv6-only clusters. Matrices record `network_profile` so repeated
@@ -30,7 +31,7 @@ bash hack/ci/delete-network-kind.sh
 The profiles are `ipv4`, `ipv6`, `dual-ipv4`, and `dual-ipv6`. The setup script refuses to reuse an existing cluster or
 Docker network. It records the Kind and Cilium configuration and the actual Node and API Service addresses. Cleanup
 requires the network's cluster label and a matching per-run ownership token. The lab uses the Cilium version in `hack/dev/tool-versions.env` and an
-administrator-owned API-server policy; it does not replace the generated Kubernetes NetworkPolicies.
+operator-owned namespaced API-server entity policy. Test fixtures opt in through `spec.network.apiServerEgress` when a network profile is set. The lab does not install an administrator API-server exception; the tests reject cluster-wide policies that could mask missing egress. Standard Kubernetes NetworkPolicies remain in force.
 
 Network qualification gives the provisioner a 500m CPU limit and 256 MiB memory limit for cache warmup. Production
 resource configuration remains independent of this test fixture. These tests do not qualify cloud load balancers,
