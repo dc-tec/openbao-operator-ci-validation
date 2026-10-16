@@ -22,7 +22,16 @@ type storageEndpointRequestGuard struct {
 	dialContext func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
-var storageAmbiguousNumericHostPattern = regexp.MustCompile(`(?i)^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+)){0,3}$`)
+var (
+	storageAmbiguousNumericHostPattern = regexp.MustCompile(`(?i)^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+)){0,3}$`)
+	// These cloud identity endpoints use ULA addresses rather than IPv6 link-local addresses.
+	// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-IMDS-new-instances.html
+	// https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html
+	// https://docs.cloud.google.com/compute/docs/metadata/overview
+	awsInstanceMetadataIPv6    = netip.MustParseAddr("fd00:ec2::254")
+	awsPodIdentityIPv6         = netip.MustParseAddr("fd00:ec2::23")
+	googleInstanceMetadataIPv6 = netip.MustParseAddr("fd20:ce::254")
+)
 
 func applyStorageEndpointRequestGuard(client *http.Client, transport *http.Transport, enabled bool) {
 	if !enabled {
@@ -139,12 +148,15 @@ func normalizeStorageEndpointRequestHost(host string) string {
 }
 
 func isForbiddenStorageEndpointRequestAddress(addr netip.Addr) bool {
-	addr = addr.Unmap()
+	addr = addr.Unmap().WithZone("")
 	return !addr.IsValid() ||
 		addr.IsLoopback() ||
 		addr.IsLinkLocalUnicast() ||
 		addr.IsUnspecified() ||
-		addr.IsMulticast()
+		addr.IsMulticast() ||
+		addr == awsInstanceMetadataIPv6 ||
+		addr == awsPodIdentityIPv6 ||
+		addr == googleInstanceMetadataIPv6
 }
 
 func networkAllowsEndpointAddress(network string, addr netip.Addr) bool {
