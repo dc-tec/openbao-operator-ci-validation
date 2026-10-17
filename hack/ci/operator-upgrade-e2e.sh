@@ -10,7 +10,9 @@ MIGRATION_FIXTURE_DIR="${ROOT_DIR}/test/fixtures/api-migration"
 source "${FIXTURE_DIR}/versions.env"
 
 FROM_VERSION="${OPERATOR_UPGRADE_E2E_FROM_VERSION:-${OPERATOR_UPGRADE_BASELINE}}"
+BASELINE_CHART="${OPERATOR_UPGRADE_E2E_BASELINE_CHART:-${OPERATOR_UPGRADE_BASELINE_CHART}}"
 MIGRATION_FROM_VERSION="${OPERATOR_UPGRADE_MIGRATION_BASELINE}"
+MIGRATION_TO_VERSION="${OPERATOR_UPGRADE_MIGRATION_TARGET}"
 TARGET_RELEASE="${OPERATOR_UPGRADE_E2E_TARGET_RELEASE:-${OPERATOR_UPGRADE_TARGET_RELEASE}}"
 TARGET_VERSION="${OPERATOR_UPGRADE_E2E_TARGET_VERSION:-${TARGET_RELEASE}-e2e}"
 VERIFY_ONLY="${OPERATOR_UPGRADE_E2E_VERIFY_ONLY:-false}"
@@ -305,9 +307,9 @@ create_external_tls_secrets() {
 verify_harness() {
   local required_files=(
     "${FIXTURE_DIR}/versions.env"
-    "${ROOT_DIR}/release-notes/${TARGET_RELEASE}.md"
+    "${ROOT_DIR}/release-notes/${MIGRATION_TO_VERSION}.md"
     "${MIGRATION_FIXTURE_DIR}/${MIGRATION_FROM_VERSION}-openbaocluster.yaml"
-    "${MIGRATION_FIXTURE_DIR}/${TARGET_RELEASE}-openbaocluster.yaml"
+    "${MIGRATION_FIXTURE_DIR}/${MIGRATION_TO_VERSION}-openbaocluster.yaml"
     "${FIXTURE_DIR}/tenant.yaml"
     "${FIXTURE_DIR}/cluster.yaml"
     "${FIXTURE_DIR}/seed-data-job.yaml"
@@ -321,7 +323,7 @@ verify_harness() {
     "${FIXTURE_DIR}/post-upgrade-tenant.yaml"
   )
 
-  if [[ -z "${FROM_VERSION}" || -z "${TARGET_RELEASE}" ]]; then
+  if [[ -z "${FROM_VERSION}" || -z "${TARGET_RELEASE}" || -z "${MIGRATION_TO_VERSION}" ]]; then
     echo "operator upgrade baseline and target release must be set" >&2
     exit 1
   fi
@@ -343,7 +345,7 @@ verify_harness() {
       exit 1
     fi
   done
-  if ! grep -Fq "### Upgrade from ${MIGRATION_FROM_VERSION}" "${ROOT_DIR}/release-notes/${TARGET_RELEASE}.md"; then
+  if ! grep -Fq "### Upgrade from ${MIGRATION_FROM_VERSION}" "${ROOT_DIR}/release-notes/${MIGRATION_TO_VERSION}.md"; then
     echo "release notes must document the ${MIGRATION_FROM_VERSION} API migration path" >&2
     exit 1
   fi
@@ -352,7 +354,12 @@ verify_harness() {
     exit 1
   fi
 
-  echo "Operator upgrade E2E harness verified: ${FROM_VERSION} -> ${TARGET_VERSION} (API migration fixtures: ${MIGRATION_FROM_VERSION} -> ${TARGET_RELEASE})"
+  if ! [[ "${BASELINE_CHART}" =~ ^oci://ghcr\.io/(dc-tec|kubebao)/charts/openbao-operator$ ]]; then
+    echo "operator upgrade baseline chart must use the official OCI chart coordinates: ${BASELINE_CHART}" >&2
+    exit 1
+  fi
+
+  echo "Operator upgrade E2E harness verified: ${FROM_VERSION} -> ${TARGET_VERSION} (baseline chart: ${BASELINE_CHART}; API migration fixtures: ${MIGRATION_FROM_VERSION} -> ${MIGRATION_TO_VERSION})"
 }
 
 verify_harness
@@ -505,7 +512,7 @@ echo "Installing cert-manager..." >&2
 
 echo "Installing released operator ${FROM_VERSION}..." >&2
 echo "Install client: $("${HELM_INSTALL_BIN}" version --short)" >&2
-"${HELM_INSTALL_BIN}" install openbao-operator oci://ghcr.io/dc-tec/charts/openbao-operator \
+"${HELM_INSTALL_BIN}" install openbao-operator "${BASELINE_CHART}" \
   --version "${FROM_VERSION}" \
   --namespace "${OPERATOR_NAMESPACE}" \
   --create-namespace \
@@ -630,7 +637,7 @@ migration_uid="$(
     -n "${TENANT_NAMESPACE}" \
     -o jsonpath='{.metadata.uid}'
 )"
-render_migration_fixture "${MIGRATION_FIXTURE_DIR}/${TARGET_RELEASE}-openbaocluster.yaml" | \
+render_migration_fixture "${MIGRATION_FIXTURE_DIR}/${MIGRATION_TO_VERSION}-openbaocluster.yaml" | \
   "${KUBECTL_BIN}" apply -f - >/dev/null
 
 migration_json="$("${KUBECTL_BIN}" get openbaocluster/api-stability-migration -n "${TENANT_NAMESPACE}" -o json)"
