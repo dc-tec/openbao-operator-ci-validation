@@ -14,6 +14,8 @@ verifiedBy:
   - internal/platform/entrypoint/flags.go
   - internal/service/workload/pod_deletion.go
   - test/integration/terminal_pod_cleanup_test.go
+  - test/integration/vap_pod_metadata_sync_test.go
+  - test/integration/workload_finalization_test.go
 ---
 
 The operator treats its `ValidatingAdmissionPolicy` objects and bindings as runtime dependencies. They validate custom
@@ -113,6 +115,55 @@ After applying the configuration, verify that the virtual PVC becomes `Bound` an
 mutation-lock denials for that PVC. Existing retry backoff can delay synchronization. Removing the configured caller
 blocks later binding updates; it does not undo an existing binding.
 
+## Allow scoped Pod annotation synchronization
+
+vCluster can copy host Pod annotations before it writes the virtual Pod's `/status`. If the main-resource annotation
+update is denied, that sync pass returns before the status write. The host Pod can run while the virtual Pod stays
+`Pending`. Allowing `/status` alone does not resolve this sequence; the mutation policy does not match `pods/status`.
+
+Inspect the denied virtual API request and compare its annotations with the stored Pod. A platform administrator can
+allow exact annotation keys for an exact caller and namespace:
+
+```yaml
+admissionPolicies:
+  enabled: true
+  podMetadataSync:
+    allowedCallers:
+      - username: kubernetes-super-admin
+        namespaces:
+          - openbao-demo
+        annotationKeys:
+          - example.com/observed-host-annotation
+```
+
+Replace the identity, namespace, and example annotation with values from the denied request. The default list is
+empty. Permissions remain separate for each username and namespace, including when the same username has multiple
+entries. Wildcards, group grants, and label synchronization are not supported. The caller still needs Kubernetes
+RBAC permission to update Pods.
+
+The allowance applies only to updates of existing workload Pods with the operator's managed labels and a StatefulSet
+controller UID reference. It preserves an owner-UID annotation when present. It can add, change, or remove the
+configured annotations. Pod spec, status, labels, owner references, finalizers, deletion metadata, and all other
+annotations must remain unchanged. It grants no Pod creation or deletion and no access to other resource kinds.
+Annotation keys under `openbao.org/`, `vcluster.loft.sh/`, `kubernetes.io/`, `k8s.io/`, or subdomains of the two
+Kubernetes domains remain protected. The Helm schema rejects these keys. In a Kustomize configuration, one protected
+key disables the whole allowance for that caller and namespace, including otherwise permitted keys.
+
+{{< callout type="note" title="Review each annotation's effects" >}}
+The configured identity can supply any value for the allowed keys on managed workload Pods in the listed namespace.
+Admission cannot prove that a value came from the host cluster or distinguish a syncer from another client using the
+same identity. Grant only observed keys whose effects the platform administrator accepts.
+{{< /callout >}}
+
+For Kustomize, adapt `config/overlays/pod-metadata-sync/kustomization.yaml`. The replacement configures only
+`pod_metadata_sync_callers`; the policy does not read the generated ConfigMap at runtime. Combine this configuration
+with the separate PVC binding allowance when both paths require it.
+
+Verify that the main-resource denial stops and the virtual Pod receives status updates. Syncer retry backoff can
+delay recovery. A policy change does not establish that the syncer has retried an existing Pod; inspect its requests
+before choosing a version-specific resynchronization procedure. Removing an allowance blocks later annotation
+updates and does not undo values already synchronized.
+
 ## Complete deletion of terminal workload Pods
 
 The operator can complete a previously requested deletion of a managed workload Pod. This handles virtual-cluster
@@ -141,8 +192,38 @@ Cleanup failures are logged and retried during later workload reconciliation. Th
 Cleanup relies on the virtual API's Pod status; a deletion timestamp or `NotReady` condition alone does not establish that
 containers have stopped. Unknown or nonterminal status remains blocked.
 
-This cleanup requires a live ownership chain. It does not adopt orphan Pods or override cluster deletion, pause,
-restore holds, or finalizer handling. It is not a general force-deletion or host-node fencing mechanism.
+### Finish cluster deletion before releasing ownership
+
+Cluster finalization uses a separate cleanup path. The operator requests foreground deletion of its StatefulSets
+and keeps the `OpenBaoCluster` finalizer until the workload Pods and StatefulSets are gone. Foreground deletion keeps
+the StatefulSet available as ownership proof while its dependent Pods terminate.
+
+The operator can complete an already-deleting terminal Pod under the same Pod-state, ownership, finalizer, and
+conditional-delete checks described above. This path requires the original deleting cluster with its operator
+finalizer and a foreground-deleting StatefulSet. A paused cluster can finish an authorized deletion; a restore hold
+still blocks it. Running, unknown, or unproven Pods and foreign finalizers keep deletion pending.
+
+For legacy StatefulSets without an `openbao.org/owner-uid` annotation, the operator first validates the exact cluster
+controller reference and managed labels. It adds only the missing annotation with UID and resource-version checks,
+then requeues before deletion. Conflicting provenance is never overwritten. This migration also runs for paused or
+already-deleting workloads; subsequent cleanup still requires full managed ownership proof.
+
+The operator does not scale the StatefulSet to zero for this cleanup because `whenScaled: Delete` would remove data
+PVCs. For `Retain`, it orphans generated recovery Secrets before waiting for workloads. Admission blocks garbage
+collection of managed `<cluster>-unseal-key` and `<cluster>-root-token` Secrets in an active namespace. This also
+protects the interval before the first reconcile of a foreground-deleting cluster. The guard uses the generated
+name and managed-resource labels, so it also covers Secrets created before owner-UID annotations were introduced.
+
+For `DeletePVCs` and `DeleteAll`, the operator deletes generated recovery Secrets after workload cleanup, using
+metadata-only reads, current deletion authority, ownership proof, and UID and resource-version preconditions.
+Operator identities and authorized maintenance retain deletion access. Namespace teardown can delete these Secrets
+once the namespace has a deletion timestamp; the existing mutation lock still checks the caller. Namespace deletion
+cannot preserve namespaced recovery material.
+
+The operator releases the cluster finalizer after cleanup. See [decommission a cluster](../../operate/decommission/).
+
+Both paths require current ownership proof. They do not adopt existing orphan Pods or remove foreign finalizers.
+They are not general force-deletion or host-node fencing mechanisms.
 
 ## Verify the installed guardrails
 
